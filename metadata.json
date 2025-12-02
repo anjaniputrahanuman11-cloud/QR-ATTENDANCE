@@ -1,0 +1,7 @@
+{
+  "name": " QR Attendance System12",
+  "description": "A web application to track attendance using QR codes, with additional tracking for items like eggs and bananas. It allows scanning via webcam or file upload, viewing records, and exporting data to Excel or PDF.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
