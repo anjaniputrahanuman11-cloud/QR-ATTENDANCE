@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -52,7 +53,7 @@
         );
         const StopIcon = (props) => (
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 7.5A2.25 2.25 0 017.5 5.25h9a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25 2.25h-9a2.25 2.25 0 01-2.25-2.25v-9z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 7.5A2.25 2.25 0 017.5 5.25h9a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25-2.25h-9a2.25 2.25 0 01-2.25-2.25v-9z" />
             </svg>
         );
         const UploadIcon = (props) => (
@@ -304,26 +305,45 @@
                 } catch (error) { console.error('Error writing to localStorage:', error); }
             }, [attendanceData]);
 
-            useEffect(() => {
-                Html5Qrcode.getCameras()
-                    .then(devices => {
-                        if (devices && devices.length) {
-                            setCameras(devices);
-                            const backCamera = devices.find(d => d.label.toLowerCase().includes('back'));
-                            setSelectedCameraId(backCamera ? backCamera.id : devices[0].id);
-                        }
-                    })
-                    .catch(err => {
-                        console.error("Error getting cameras", err);
-                        showMessage('Could not access cameras. Please grant permission.', 'error');
-                    });
-            }, []);
-            
             const showMessage = (text, type) => {
                 setMessage({ text, type });
                 setTimeout(() => setMessage(null), 5000);
             };
+            
+            const loadCameras = useCallback(async () => {
+                try {
+                    const devices = await Html5Qrcode.getCameras();
+                    if (!devices || devices.length === 0) {
+                        setCameras([]);
+                        return;
+                    }
 
+                    const processedCameras = devices.map((device, index) => {
+                        let label = device.label || `Camera ${index + 1}`;
+                        if (/(back|rear|environment)/i.test(label)) {
+                            label = `📷 Back Camera`;
+                        } else if (/(front|user|face)/i.test(label)) {
+                            label = `🤳 Front Camera`;
+                        }
+                        return { ...device, processedLabel: label };
+                    });
+
+                    setCameras(processedCameras);
+                    
+                    if (!selectedCameraId) {
+                         const backCamera = processedCameras.find(d => /(back|rear|environment)/i.test(d.label));
+                         setSelectedCameraId(backCamera ? backCamera.id : processedCameras[0].id);
+                    }
+                } catch (err) {
+                    setCameras([]);
+                    // Don't show an error on initial load, only when user tries to scan.
+                }
+            }, [selectedCameraId]);
+
+            useEffect(() => {
+                loadCameras();
+            }, [loadCameras]);
+            
             const playSuccessSound = () => {
                 if (!audioContext.current) return;
                 const oscillator = audioContext.current.createOscillator();
@@ -342,7 +362,12 @@
                 if (html5QrCodeRef.current && html5QrCodeRef.current.isScanning) {
                     html5QrCodeRef.current.stop()
                         .then(() => setIsScanning(false))
-                        .catch(err => console.error("Failed to stop scanning.", err));
+                        .catch(err => {
+                            console.error("Failed to stop scanning.", err);
+                            setIsScanning(false); // Force state update
+                        });
+                } else {
+                     setIsScanning(false);
                 }
             }, []);
 
@@ -365,18 +390,55 @@
                 }
             }, [attendanceData, stopScan]);
 
-            const startWebcamScan = useCallback(() => {
-                if (!selectedCameraId) return showMessage('Please select a camera.', 'error');
-                stopScan();
+            const startWebcamScan = async () => {
+                if (isScanning) {
+                    stopScan();
+                    return;
+                }
+
+                // Step 1: Explicitly request permission to unblock device enumeration.
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    // Immediately stop the stream; we only needed it to trigger the permission prompt.
+                    stream.getTracks().forEach(track => track.stop());
+                } catch (err) {
+                    console.error("Camera permission was denied:", err);
+                    showMessage("Camera permission is required to scan. Please allow access and try again.", 'error');
+                    return;
+                }
+
+                // Step 2: Now that permission is granted, reload the camera list.
+                await loadCameras();
+                
+                // Step 3: Determine which camera to use.
+                let cameraIdToUse = selectedCameraId;
+                if (!cameraIdToUse && cameras.length > 0) {
+                     const backCamera = cameras.find(d => /(back|rear|environment)/i.test(d.label));
+                     cameraIdToUse = backCamera ? backCamera.id : cameras[0].id;
+                     setSelectedCameraId(cameraIdToUse);
+                }
+
+                if (!cameraIdToUse) {
+                    showMessage("No cameras found. Please ensure your device has a camera and permission is granted.", 'error');
+                    return;
+                }
+
+                // Step 4: Start the scanner.
+                stopScan(); // Ensure any previous instance is stopped.
+                
                 html5QrCodeRef.current = new Html5Qrcode('qr-reader');
                 const config = { fps: 10, qrbox: { width: 250, height: 250 } };
-                html5QrCodeRef.current.start(selectedCameraId, config, onScanSuccess, (errorMessage) => {})
-                    .then(() => setIsScanning(true))
-                    .catch(err => {
-                        console.error(err);
-                        showMessage('Failed to start scanner. Check camera permissions.', 'error');
-                    });
-            }, [selectedCameraId, stopScan, onScanSuccess]);
+                
+                try {
+                    await html5QrCodeRef.current.start(cameraIdToUse, config, onScanSuccess, (errorMessage) => { /* Ignore non-success messages */ });
+                    setIsScanning(true);
+                } catch (err) {
+                    console.error("Failed to start scanner:", err);
+                    showMessage(`Failed to start camera. It might be in use by another app. Error: ${err.name}`, 'error');
+                    setIsScanning(false);
+                }
+            };
+
 
             const handleFileScan = useCallback((event) => {
                 const file = event.target.files?.[0];
@@ -484,7 +546,7 @@
                                 <div className="flex flex-col sm:flex-row gap-4 mb-4">
                                     <select id="cameraSelect" value={selectedCameraId} onChange={(e) => setSelectedCameraId(e.target.value)} className="flex-grow p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" disabled={isScanning}>
                                         {cameras.length > 0 ? cameras.map(cam => (
-                                            <option key={cam.id} value={cam.id}>{cam.label || `Camera ${cam.id.substring(0,6)}`}</option>
+                                            <option key={cam.id} value={cam.id}>{cam.processedLabel || cam.label}</option>
                                         )) : <option>No cameras found</option>}
                                     </select>
                                 </div>
@@ -545,7 +607,7 @@
                                     ) : (
                                         <p className="text-center text-gray-500 py-8">No records match your filters.</p>
                                     )
-                                ) : (
+                                 ) : (
                                     <p className="text-center text-gray-500 py-8">No attendance records yet.</p>
                                 )}
                             </div>
